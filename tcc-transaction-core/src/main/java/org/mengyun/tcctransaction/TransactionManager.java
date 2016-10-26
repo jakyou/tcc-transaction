@@ -1,17 +1,18 @@
 package org.mengyun.tcctransaction;
 
+import org.apache.log4j.Logger;
 import org.mengyun.tcctransaction.api.TransactionContext;
 import org.mengyun.tcctransaction.api.TransactionStatus;
 import org.mengyun.tcctransaction.common.TransactionType;
 import org.mengyun.tcctransaction.support.TransactionConfigurator;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
  * Created by changmingxie on 10/26/15.
  */
 public class TransactionManager {
+
+
+    static final Logger logger = Logger.getLogger(TransactionManager.class.getSimpleName());
 
     private TransactionConfigurator transactionConfigurator;
 
@@ -19,15 +20,14 @@ public class TransactionManager {
         this.transactionConfigurator = transactionConfigurator;
     }
 
-    private final Map<Thread, Transaction> transactionMap = new ConcurrentHashMap<Thread, Transaction>();
+    private ThreadLocal<Transaction> threadLocalTransaction = new ThreadLocal<Transaction>();
 
     public void begin() {
 
         Transaction transaction = new Transaction(TransactionType.ROOT);
         TransactionRepository transactionRepository = transactionConfigurator.getTransactionRepository();
         transactionRepository.create(transaction);
-
-        this.transactionMap.put(Thread.currentThread(), transaction);
+        threadLocalTransaction.set(transaction);
     }
 
     public void propagationNewBegin(TransactionContext transactionContext) {
@@ -35,7 +35,7 @@ public class TransactionManager {
         Transaction transaction = new Transaction(transactionContext);
         transactionConfigurator.getTransactionRepository().create(transaction);
 
-        this.transactionMap.put(Thread.currentThread(), transaction);
+        threadLocalTransaction.set(transaction);
     }
 
     public void propagationExistBegin(TransactionContext transactionContext) throws NoExistedTransactionException {
@@ -44,12 +44,11 @@ public class TransactionManager {
 
         if (transaction != null) {
             transaction.changeStatus(TransactionStatus.valueOf(transactionContext.getStatus()));
-            this.transactionMap.put(Thread.currentThread(), transaction);
+            threadLocalTransaction.set(transaction);
         } else {
             throw new NoExistedTransactionException();
         }
     }
-
 
     public void commit() {
 
@@ -57,43 +56,34 @@ public class TransactionManager {
 
         transaction.changeStatus(TransactionStatus.CONFIRMING);
 
+        transactionConfigurator.getTransactionRepository().update(transaction);
+
         try {
-            transactionConfigurator.getTransactionRepository().update(transaction);
             transaction.commit();
             transactionConfigurator.getTransactionRepository().delete(transaction);
-
         } catch (Throwable commitException) {
-
-            if (transaction.getTransactionType().equals(TransactionType.ROOT)) {
-                transactionConfigurator.getTransactionRepository().addErrorTransaction(transaction);
-            }
-
-            throw new RuntimeException(commitException);
+            logger.error("compensable transaction confirm failed.", commitException);
+            throw new ConfirmingException(commitException);
         }
     }
 
     public Transaction getCurrentTransaction() {
-        return transactionMap.get(Thread.currentThread());
+        return threadLocalTransaction.get();
     }
 
     public void rollback() {
 
         Transaction transaction = getCurrentTransaction();
-
         transaction.changeStatus(TransactionStatus.CANCELLING);
+
+        transactionConfigurator.getTransactionRepository().update(transaction);
+        
         try {
-
-            transactionConfigurator.getTransactionRepository().update(transaction);
-
             transaction.rollback();
-
             transactionConfigurator.getTransactionRepository().delete(transaction);
         } catch (Throwable rollbackException) {
-            if (transaction.getTransactionType().equals(TransactionType.ROOT)) {
-                transactionConfigurator.getTransactionRepository().addErrorTransaction(transaction);
-            }
-            throw new RuntimeException(rollbackException);
+            logger.error("compensable transaction rollback failed.", rollbackException);
+            throw new CancellingException(rollbackException);
         }
-
     }
 }

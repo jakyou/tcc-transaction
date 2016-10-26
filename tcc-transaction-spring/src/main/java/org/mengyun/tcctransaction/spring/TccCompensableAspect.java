@@ -16,7 +16,6 @@ public class TccCompensableAspect implements Ordered {
 
     private int order = Ordered.HIGHEST_PRECEDENCE;
 
-    @Autowired
     private CompensableTransactionInterceptor compensableTransactionInterceptor;
 
     @Pointcut("@annotation(org.mengyun.tcctransaction.Compensable)")
@@ -25,9 +24,9 @@ public class TccCompensableAspect implements Ordered {
     }
 
     @Around("compensableService()")
-    public void interceptCompensableMethod(ProceedingJoinPoint pjp) throws Throwable {
+    public Object interceptCompensableMethod(ProceedingJoinPoint pjp) throws Throwable {
 
-        compensableTransactionInterceptor.interceptCompensableMethod(pjp);
+        return compensableTransactionInterceptor.interceptCompensableMethod(pjp);
     }
 
     @Override
@@ -37,5 +36,9 @@ public class TccCompensableAspect implements Ordered {
 
     public void setOrder(int order) {
         this.order = order;
+    }
+
+    public void setCompensableTransactionInterceptor(CompensableTransactionInterceptor compensableTransactionInterceptor) {
+        this.compensableTransactionInterceptor = compensableTransactionInterceptor;
     }
 }

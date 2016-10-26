@@ -1,7 +1,10 @@
 package org.mengyun.tcctransaction.repository;
 
 import org.mengyun.tcctransaction.Transaction;
-import org.mengyun.tcctransaction.utils.SerializationUtils;
+import org.mengyun.tcctransaction.common.TransactionType;
+import org.mengyun.tcctransaction.repository.helper.TransactionSerializer;
+import org.mengyun.tcctransaction.serializer.JdkSerializationSerializer;
+import org.mengyun.tcctransaction.serializer.ObjectSerializer;
 
 import javax.transaction.xa.Xid;
 import java.io.File;
@@ -11,10 +14,12 @@ import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 /**
  * Created by changming.xie on 2/24/16.
+ * this repository is suitable for single node, not for cluster nodes
  */
 public class FileSystemTransactionRepository extends CachableTransactionRepository {
 
@@ -22,29 +27,41 @@ public class FileSystemTransactionRepository extends CachableTransactionReposito
 
     private volatile boolean initialized;
 
+    private ObjectSerializer serializer = new JdkSerializationSerializer();
+
+    public void setSerializer(ObjectSerializer serializer) {
+        this.serializer = serializer;
+    }
+
     public void setRootPath(String rootPath) {
         this.rootPath = rootPath;
     }
 
     @Override
-    protected void doCreate(Transaction transaction) {
-
+    protected int doCreate(Transaction transaction) {
         writeFile(transaction);
+        return 1;
     }
 
     @Override
-    protected void doUpdate(Transaction transaction) {
+    protected int doUpdate(Transaction transaction) {
+
+        transaction.updateVersion();
+        transaction.updateTime();
+
         writeFile(transaction);
+        return 1;
     }
 
     @Override
-    protected void doDelete(Transaction transaction) {
+    protected int doDelete(Transaction transaction) {
 
         String fullFileName = getFullFileName(transaction.getXid());
         File file = new File(fullFileName);
         if (file.exists()) {
             file.delete();
         }
+        return 1;
     }
 
     @Override
@@ -61,6 +78,23 @@ public class FileSystemTransactionRepository extends CachableTransactionReposito
     }
 
     @Override
+    protected List<Transaction> doFindAllUnmodifiedSince(Date date) {
+
+        List<Transaction> allTransactions = doFindAll();
+
+        List<Transaction> allUnmodifiedSince = new ArrayList<Transaction>();
+
+        for (Transaction transaction : allTransactions) {
+            if (transaction.getTransactionType().equals(TransactionType.ROOT)
+                    && transaction.getLastUpdateTime().compareTo(date) < 0) {
+                allUnmodifiedSince.add(transaction);
+            }
+        }
+
+        return allUnmodifiedSince;
+    }
+
+
     protected List<Transaction> doFindAll() {
 
         List<Transaction> transactions = new ArrayList<Transaction>();
@@ -109,7 +143,7 @@ public class FileSystemTransactionRepository extends CachableTransactionReposito
         FileChannel channel = null;
         RandomAccessFile raf = null;
 
-        byte[] content = SerializationUtils.serialize(transaction);
+        byte[] content = TransactionSerializer.serialize(serializer, transaction);
         try {
             raf = new RandomAccessFile(file, "rw");
             channel = raf.getChannel();
@@ -146,7 +180,7 @@ public class FileSystemTransactionRepository extends CachableTransactionReposito
             fis.read(content);
 
             if (content != null) {
-                return (Transaction) SerializationUtils.deserialize(content);
+                return TransactionSerializer.deserialize(serializer, content);
             }
         } catch (Exception e) {
             throw new TransactionIOException(e);

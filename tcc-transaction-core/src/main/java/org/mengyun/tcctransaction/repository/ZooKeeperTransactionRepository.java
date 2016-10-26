@@ -3,10 +3,14 @@ package org.mengyun.tcctransaction.repository;
 import org.apache.zookeeper.*;
 import org.apache.zookeeper.data.Stat;
 import org.mengyun.tcctransaction.Transaction;
-import org.mengyun.tcctransaction.utils.SerializationUtils;
+import org.mengyun.tcctransaction.common.TransactionType;
+import org.mengyun.tcctransaction.repository.helper.TransactionSerializer;
+import org.mengyun.tcctransaction.serializer.JdkSerializationSerializer;
+import org.mengyun.tcctransaction.serializer.ObjectSerializer;
 
 import javax.transaction.xa.Xid;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 /**
@@ -22,8 +26,14 @@ public class ZooKeeperTransactionRepository extends CachableTransactionRepositor
 
     private volatile ZooKeeper zk;
 
+    private ObjectSerializer serializer = new JdkSerializationSerializer();
+
     public ZooKeeperTransactionRepository() {
         super();
+    }
+
+    public void setSerializer(ObjectSerializer serializer) {
+        this.serializer = serializer;
     }
 
     public void setZkRootPath(String zkRootPath) {
@@ -39,34 +49,36 @@ public class ZooKeeperTransactionRepository extends CachableTransactionRepositor
     }
 
     @Override
-    protected void doCreate(Transaction transaction) {
+    protected int doCreate(Transaction transaction) {
 
         try {
-
-
             getZk().create(getTxidPath(transaction.getXid()),
-                    SerializationUtils.serialize(transaction), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
-
+                    TransactionSerializer.serialize(serializer, transaction), ZooDefs.Ids.OPEN_ACL_UNSAFE, CreateMode.PERSISTENT);
+            return 1;
         } catch (Exception e) {
             throw new TransactionIOException(e);
         }
     }
 
     @Override
-    protected void doUpdate(Transaction transaction) {
+    protected int doUpdate(Transaction transaction) {
 
         try {
-            Stat stat = getZk().setData(getTxidPath(transaction.getXid()), SerializationUtils.serialize(transaction), transaction.getVersion());
-            transaction.setVersion(stat.getVersion());
+
+            transaction.updateTime();
+            transaction.updateVersion();
+            Stat stat = getZk().setData(getTxidPath(transaction.getXid()), TransactionSerializer.serialize(serializer, transaction), (int) transaction.getVersion() - 2);
+            return 1;
         } catch (Exception e) {
             throw new TransactionIOException(e);
         }
     }
 
     @Override
-    protected void doDelete(Transaction transaction) {
+    protected int doDelete(Transaction transaction) {
         try {
-            getZk().delete(getTxidPath(transaction.getXid()), transaction.getVersion());
+            getZk().delete(getTxidPath(transaction.getXid()), (int) transaction.getVersion() - 1);
+            return 1;
         } catch (Exception e) {
             throw new TransactionIOException(e);
         }
@@ -79,8 +91,7 @@ public class ZooKeeperTransactionRepository extends CachableTransactionRepositor
         try {
             Stat stat = new Stat();
             content = getZk().getData(getTxidPath(xid), false, stat);
-            Transaction transaction = (Transaction) SerializationUtils.deserialize(content);
-            transaction.setVersion(stat.getVersion());
+            Transaction transaction = TransactionSerializer.deserialize(serializer, content);
             return transaction;
         } catch (KeeperException.NoNodeException e) {
 
@@ -91,6 +102,22 @@ public class ZooKeeperTransactionRepository extends CachableTransactionRepositor
     }
 
     @Override
+    protected List<Transaction> doFindAllUnmodifiedSince(Date date) {
+
+        List<Transaction> allTransactions = doFindAll();
+
+        List<Transaction> allUnmodifiedSince = new ArrayList<Transaction>();
+
+        for (Transaction transaction : allTransactions) {
+            if (transaction.getTransactionType().equals(TransactionType.ROOT)
+                    && transaction.getLastUpdateTime().compareTo(date) < 0) {
+                allUnmodifiedSince.add(transaction);
+            }
+        }
+
+        return allUnmodifiedSince;
+    }
+
     protected List<Transaction> doFindAll() {
 
         List<Transaction> transactions = new ArrayList<Transaction>();
@@ -108,8 +135,7 @@ public class ZooKeeperTransactionRepository extends CachableTransactionRepositor
             try {
                 Stat stat = new Stat();
                 content = getZk().getData(getTxidPath(znodePath), false, stat);
-                Transaction transaction = (Transaction) SerializationUtils.deserialize(content);
-                transaction.setVersion(stat.getVersion());
+                Transaction transaction =  TransactionSerializer.deserialize(serializer, content);
                 transactions.add(transaction);
             } catch (Exception e) {
                 throw new TransactionIOException(e);
